@@ -1,3 +1,4 @@
+# coding=utf8
 # Copyright 2018 Dong-Hyun Lee, Kakao Brain.
 # (Strongly inspired by original Google BERT code and Hugging Face's code)
 
@@ -15,18 +16,21 @@ import tokenization
 import models
 import optim
 import train
+import os
+import random
+import numpy as np
 
 from utils import set_seeds, get_device, truncate_tokens_pair
 
 class CsvDataset(Dataset):
     """ Dataset Class for CSV file """
     labels = None
-    def __init__(self, file, pipeline=[]): # cvs file and pipeline object
+    def __init__(self, file, delimiter, pipeline=[]): # cvs file and pipeline object
         Dataset.__init__(self)
         data = []
         with open(file, "r") as f:
             # list of splitted lines : line is also list
-            lines = csv.reader(f, delimiter='\t', quotechar=None)
+            lines = csv.reader(f, delimiter=delimiter, quotechar=None)
             for instance in self.get_instances(lines): # instance : tuple of fields
                 for proc in pipeline: # a bunch of pre-processing
                     instance = proc(instance)
@@ -50,27 +54,35 @@ class MRPC(CsvDataset):
     """ Dataset class for MRPC """
     labels = ("0", "1") # label names
     def __init__(self, file, pipeline=[]):
-        super().__init__(file, pipeline)
+        super().__init__(file, '\t', pipeline)
 
     def get_instances(self, lines):
         for line in itertools.islice(lines, 1, None): # skip header
             yield line[0], line[3], line[4] # label, text_a, text_b
 
-
 class MNLI(CsvDataset):
     """ Dataset class for MNLI """
     labels = ("contradiction", "entailment", "neutral") # label names
     def __init__(self, file, pipeline=[]):
-        super().__init__(file, pipeline)
+        super().__init__(file, '\t', pipeline)
 
     def get_instances(self, lines):
         for line in itertools.islice(lines, 1, None): # skip header
             yield line[-1], line[8], line[9] # label, text_a, text_b
 
+#wiki has 427800 data
+class WIKI(CsvDataset):
+    labels = ("0", "1")
+    def __init__(selfself, file, pipeline=[]):
+        super().__init__(file, '\t', pipeline)
+
+    def get_instances(self, lines):
+        for line in itertools.islice(lines, 1, None):
+            yield line[0], line[1], line[2] #label, paragraph_a, paragraph_b
 
 def dataset_class(task):
     """ Mapping from task string to Dataset Class """
-    table = {'mrpc': MRPC, 'mnli': MNLI}
+    table = {'mrpc': MRPC, 'mnli': MNLI, 'wiki': WIKI}
     return table[task]
 
 
@@ -153,19 +165,92 @@ class Classifier(nn.Module):
     """ Classifier with Transformer """
     def __init__(self, cfg, n_labels):
         super().__init__()
+
         self.transformer = models.Transformer(cfg)
         self.fc = nn.Linear(cfg.dim, cfg.dim)
+        self.activ = nn.Tanh()
+        self.drop = nn.Dropout(cfg.p_drop_hidden)
+        self.classifier = nn.Linear(cfg.dim, n_labels)        
+        '''
+        self.n_labels = n_labels
+        self.transformer = models.Transformer(cfg)
+
+        self.fc = nn.Linear(cfg.dim, n_labels)
+        self.norm = nn.BatchNorm1d(cfg.dim)
+        self.activ = nn.Sigmoid()
+        self.drop = nn.Dropout(cfg.p_drop_hidden)
+        self.classifier = nn.Linear(cfg.max_len * n_labels, n_labels)
+        '''
+        '''
+        self.transformer = models.Transformer(cfg)
+        self.fc1 = nn.Linear(16*cfg.dim, 8*cfg.dim)
+        self.norm1 = nn.BatchNorm1d(8*cfg.dim)
+        self.fc2 = nn.Linear(8*cfg.dim, 4*cfg.dim)
+        self.norm2 = nn.BatchNorm1d(4*cfg.dim)
+        self.fc3 = nn.Linear(4*cfg.dim, 2*cfg.dim)
+        self.norm3 = nn.BatchNorm1d(2*cfg.dim)
+        self.fc4 = nn.Linear(2*cfg.dim, cfg.dim)
+        self.norm4 = nn.BatchNorm1d(cfg.dim)
+        self.activ = nn.ReLU()
+        self.drop = nn.Dropout(cfg.p_drop_hidden)
+        self.classifier = nn.Linear(cfg.dim, n_labels)
+        '''
+
+    def forward(self, input_ids, segment_ids, input_mask):
+        h = self.transformer(input_ids, segment_ids, input_mask)
+
+        # only use the first h in the sequence
+        pooled_h = self.activ(self.fc(h[:, 0]))
+        logits = self.classifier(self.drop(pooled_h))
+        return logits
+        '''
+        batch_size, seq_length, hidden_size = h.size()
+        reshape_h = h.view(batch_size*seq_length, hidden_size)
+        pooled_h = self.activ(self.fc(self.norm(reshape_h)))
+        pooled_h = pooled_h.view(batch_size, seq_length*self.n_labels)
+        logits = self.activ(self.classifier(self.drop(pooled_h)))
+        return logits
+        '''
+        '''
+        #0 = batch_size, 1 = seq_length, 2 = hidden_size
+        h = self.transformer(input_ids, segment_ids, input_mask)
+        # only use the first h in the sequence
+        batch_size, seq_length, hidden_size = h.size()
+        #random_sample = random.sample(range(0, seq_length), seq_length // 4)
+        random_sample = list(range(0, seq_length // 32))
+        #seq_length // 4 , 4, hidden_size
+        random_h = [h[:, sample] for sample in random_sample]
+        stack_h = torch.stack(random_h)
+        view_h = stack_h.view(batch_size, (seq_length // 32) * hidden_size)
+        combined_h = self.activ(self.norm1(self.fc1(self.drop(view_h))))
+        combined_h2 = self.activ(self.norm2(self.fc2(self.drop(combined_h))))
+        combined_h3 = self.activ(self.norm3(self.fc3(self.drop(combined_h2))))
+        combined_h4 = self.activ(self.norm4(self.fc4(self.drop(combined_h3))))
+        logits = self.classifier(self.drop(combined_h4))
+        return logits
+        '''
+'''
+class Squad(nn.Module):
+    def __init__(self, cfg, n_labels):
+        super().__init__()
+        self.transformer = models.Transformer(cfg)
+        self.fc = nn.Linear(cfg.dim, 2)
+        self.sequential = nn.Sequential(self.fc, self.fc)
         self.activ = nn.Tanh()
         self.drop = nn.Dropout(cfg.p_drop_hidden)
         self.classifier = nn.Linear(cfg.dim, n_labels)
 
     def forward(self, input_ids, segment_ids, input_mask):
-        h = self.transformer(input_ids, segment_ids, input_mask)
+        #0 = 4, 1 = seq_length, 2 = hidden_size
+        sequence_h = self.transformer(input_ids, segment_ids, input_mask)
         # only use the first h in the sequence
-        pooled_h = self.activ(self.fc(h[:, 0]))
+        batch_size, seq_length, hidden_size = sequence_h.size()
+        pooled_h = sequence_h.view(batch_size*seq_length, hidden_size)
         logits = self.classifier(self.drop(pooled_h))
+        logits = logits.view(batch_size, seq_length, n_labels)
+        
         return logits
-
+'''
 #pretrain_file='../uncased_L-12_H-768_A-12/bert_model.ckpt',
 #pretrain_file='../exp/bert/pretrain_100k/model_epoch_3_steps_9732.pt',
 
@@ -178,7 +263,6 @@ def main(task='mrpc',
          data_parallel=True,
          vocab='../uncased_L-12_H-768_A-12/vocab.txt',
          save_dir='../exp/bert/mrpc',
-         max_len=128,
          mode='train'):
 
     cfg = train.Config.from_json(train_cfg)
@@ -189,9 +273,9 @@ def main(task='mrpc',
     tokenizer = tokenization.FullTokenizer(vocab_file=vocab, do_lower_case=True)
     TaskDataset = dataset_class(task) # task dataset class according to the task
     pipeline = [Tokenizing(tokenizer.convert_to_unicode, tokenizer.tokenize),
-                AddSpecialTokensWithTruncation(max_len),
+                AddSpecialTokensWithTruncation(model_cfg.max_len),
                 TokenIndexing(tokenizer.convert_tokens_to_ids,
-                              TaskDataset.labels, max_len)]
+                              TaskDataset.labels, model_cfg.max_len)]
     dataset = TaskDataset(data_file, pipeline)
     data_iter = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True)
 

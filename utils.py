@@ -67,6 +67,12 @@ def truncate_tokens_pair(tokens_a, tokens_b, max_len):
         else:
             tokens_b.pop()
 
+def truncate_tokens(tokens, max_len):
+    if len(tokens) > max_len:
+        return tokens[:max_len]
+    else:
+        return tokens
+
 def get_random_word(vocab_words):
     i = random.randint(0, len(vocab_words)-1)
     return vocab_words[i]

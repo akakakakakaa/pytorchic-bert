@@ -17,6 +17,7 @@ class Config(NamedTuple):
     """ Hyperparameters for training """
     seed: int = 3431 # random seed
     batch_size: int = 32
+    max_len: int = 128
     lr: int = 5e-5 # learning rate
     n_epochs: int = 10 # the number of epoch
     # `warm up` period = warmup(0.1)*total_steps
@@ -76,7 +77,11 @@ class Trainer(object):
             print('Epoch %d/%d : Average Loss %5.3f'%(e+1, self.cfg.n_epochs, loss_sum/(i+1)))
         self.save(global_step)
 
-    def eval(self, evaluate, model_file, data_parallel=True):
+    def eval(self, evaluate, model_file, data_parallel=True, eval_kind_names=[]):
+        if len(eval_kind_names) == 0:
+            print("Please write eval kind names")
+            exit(1)
+
         """ Evaluation Loop """
         self.model.eval() # evaluation mode
         self.load(model_file, None)
@@ -84,16 +89,23 @@ class Trainer(object):
         if data_parallel: # use Data Parallelism with Multi-GPU
             model = nn.DataParallel(model)
 
-        results = [] # prediction results
+        results_set = [] # prediction results
         iter_bar = tqdm(self.data_iter, desc='Iter (loss=X.XXX)')
         for batch in iter_bar:
             batch = [t.to(self.device) for t in batch]
             with torch.no_grad(): # evaluation without gradient calculation
-                accuracy, result = evaluate(model, batch) # accuracy to print
-            results.append(result)
+                accuracies, results = evaluate(model, batch) # accuracy to print
+            results_set.append(results)
 
-            iter_bar.set_description('Iter(acc=%5.3f)'%accuracy)
-        return results
+            iter_bar.set_description('Iter %s'%(" ".join(map(str,accuracies))))
+
+        result_with_name = []
+        for i, name in enumerate(eval_kind_names):
+            items = [item[i] for item in results_set]
+            total_accuracy = torch.cat(items).mean().item()
+            result_with_name.append({"name": name, "total_accuracy": total_accuracy})
+
+        return result_with_name
 
     def load(self, model_file, pretrain_file):
         """ load saved model or pretrained transformer (a part of model) """

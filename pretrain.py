@@ -17,6 +17,9 @@ import optim
 import train
 
 from utils import set_seeds, get_device, get_random_word, truncate_tokens_pair
+from torch.utils.data import Dataset, DataLoader
+import csv
+import itertools
 
 # Input file format :
 # 1. One sentence per line. These should ideally be actual sentences,
@@ -25,73 +28,40 @@ from utils import set_seeds, get_device, get_random_word, truncate_tokens_pair
 # 2. Blank lines between documents. Document boundaries are needed
 #    so that the "next sentence prediction" task doesn't span between documents.
 
-def seek_random_offset(f, back_margin=2000):
-    """ seek random offset of file pointer """
-    f.seek(0, 2)
-    # we remain some amount of text to read
-    max_offset = f.tell() - back_margin
-    f.seek(randint(0, max_offset), 0)
-    f.readline() # throw away an incomplete sentence
-
 class SentPairDataLoader():
     """ Load sentence pair (sequential or random order) from corpus """
-    def __init__(self, file, batch_size, tokenize, max_len, short_sampling_prob=0.1, pipeline=[]):
+    def __init__(self, file, batch_size, tokenize, max_len, pipeline=[]):
         super().__init__()
-        self.f_pos = open(file, "r", encoding='utf-8', errors='ignore') # for a positive sample
-        self.f_neg = open(file, "r", encoding='utf-8', errors='ignore') # for a negative (random) sample
+        self.f_pos = open(file, "r", encoding='utf-8', errors='ignore')
+        self.lines = csv.reader(self.f_pos, delimiter='\t', quotechar=None)
         self.tokenize = tokenize # tokenize function
         self.max_len = max_len # maximum length of tokens
-        self.short_sampling_prob = short_sampling_prob
         self.pipeline = pipeline
         self.batch_size = batch_size
 
-    def read_tokens(self, f, length, discard_last_and_restart=True):
-        """ Read tokens from file pointer with limited length """
-        tokens = []
-        while len(tokens) < length:
-            line = f.readline()
-            if not line: # end of file
-                return None
-            if not line.strip(): # blank line (delimiter of documents)
-                if discard_last_and_restart:
-                    tokens = [] # throw all and restart
-                    continue
-                else:
-                    return tokens # return last tokens in the document
-            tokens.extend(self.tokenize(line.strip()))
-        return tokens
-
     def __iter__(self): # iterator to load data
-        while True:
-            batch = []
-            for i in range(self.batch_size):
-                # sampling length of each tokens_a and tokens_b
-                # sometimes sample a short sentence to match between train and test sequences
-                len_tokens = randint(1, int(self.max_len / 2)) \
-                    if rand() < self.short_sampling_prob \
-                    else int(self.max_len / 2)
+        batch = []
+        count = 0
+        for line in itertools.islice(self.lines, 1, None):
+            is_next = int(line[0])
+            tokens_a = self.tokenize(line[1])
+            tokens_b = self.tokenize(line[2])
+            truncate_tokens_pair(tokens_a, tokens_b, self.max_len)
+            instance = (is_next, tokens_a, tokens_b)
+            for proc in self.pipeline:
+                instance = proc(instance)
 
-                is_next = rand() < 0.5 # whether token_b is next to token_a or not
+            batch.append(instance)
+            count+=1
 
-                tokens_a = self.read_tokens(self.f_pos, len_tokens, True)
-                seek_random_offset(self.f_neg)
-                f_next = self.f_pos if is_next else self.f_neg
-                tokens_b = self.read_tokens(f_next, len_tokens, False)
+            if count == self.batch_size:
+                batch_tensors = [torch.tensor(x, dtype=torch.long) for x in zip(*batch)]
+                yield batch_tensors
 
-                if tokens_a is None or tokens_b is None: # end of file
-                    self.f_pos.seek(0, 0) # reset file pointer
-                    return
+                count = 0
+                batch = []
 
-                instance = (is_next, tokens_a, tokens_b)
-                for proc in self.pipeline:
-                    instance = proc(instance)
-
-                batch.append(instance)
-
-            # To Tensor
-            batch_tensors = [torch.tensor(x, dtype=torch.long) for x in zip(*batch)]
-            yield batch_tensors
-
+        self.f_pos.seek(0)
 
 class Pipeline():
     """ Pre-process Pipeline Class : callable """
@@ -167,12 +137,25 @@ class BertModel4Pretrain(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.transformer = models.Transformer(cfg)
+
+        #logits_sentence_clsf
         self.fc = nn.Linear(cfg.dim, cfg.dim)
         self.activ1 = nn.Tanh()
+        self.classifier = nn.Linear(cfg.dim, 2)
+
+        #logits_paragraph_clsf
+        '''
+        self.fc = nn.Linear(cfg.dim, 2)
+        self.activ1 = nn.Tanh()
+        self.norm1 = models.LayerNorm(cfg)
+        self.drop = nn.Dropout(cfg.p_drop_hidden)
+        self.classifier = nn.Linear(cfg.max_len * 2, 2)
+        '''
+
+        #logits_lm
         self.linear = nn.Linear(cfg.dim, cfg.dim)
         self.activ2 = models.gelu
-        self.norm = models.LayerNorm(cfg)
-        self.classifier = nn.Linear(cfg.dim, 2)
+        self.norm2 = models.LayerNorm(cfg)
         # decoder is shared with embedding layer
         embed_weight = self.transformer.embed.tok_embed.weight
         n_vocab, n_dim = embed_weight.size()
@@ -180,16 +163,47 @@ class BertModel4Pretrain(nn.Module):
         self.decoder.weight = embed_weight
         self.decoder_bias = nn.Parameter(torch.zeros(n_vocab))
 
+        #logits_same
+        self.linear2 = nn.Linear(cfg.dim, cfg.vocab_size)
+        #self.activ3 = models.gelu
+        #self.norm3 = models.LayerNorm(cfg)
+        # decoder is shared with embedding layer
+        #embed_weight2 = self.transformer.embed.tok_embed.weight
+        #n_vocab, n_dim = embed_weight2.size()
+        #self.decoder2 = nn.Conv2d(n_dim, n_vocab, kernel=3, stride=1, padding=1)
+        #self.decoder2 = nn.Linear(n_dim, n_vocab, bias=False)
+        #self.decoder2.weight = embed_weight2
+        #self.decoder_bias2 = nn.Parameter(torch.zeros(n_vocab))
+
+
     def forward(self, input_ids, segment_ids, input_mask, masked_pos):
         h = self.transformer(input_ids, segment_ids, input_mask)
+
+        #logits_clsf
         pooled_h = self.activ1(self.fc(h[:, 0]))
-        masked_pos = masked_pos[:, :, None].expand(-1, -1, h.size(-1))
-        h_masked = torch.gather(h, 1, masked_pos)
-        h_masked = self.norm(self.activ2(self.linear(h_masked)))
-        logits_lm = self.decoder(h_masked) + self.decoder_bias
         logits_clsf = self.classifier(pooled_h)
 
-        return logits_lm, logits_clsf
+        #logits_paragraph_clsf
+        '''
+        batch_size, seq_length, hidden_size = h.size()
+        reshape_h = h.view(batch_size*seq_length, hidden_size)
+        pooled_h = self.activ1(self.fc(self.norm1(reshape_h)))
+        pooled_h = pooled_h.view(batch_size, seq_length*2)
+        logits_clsf = self.classifier(self.drop(pooled_h))
+        '''
+
+        #logits_lm
+        masked_pos = masked_pos[:, :, None].expand(-1, -1, h.size(-1))
+        h_masked = torch.gather(h, 1, masked_pos)
+        h_masked = self.norm2(self.activ2(self.linear(h_masked)))
+        logits_lm = self.decoder(h_masked) + self.decoder_bias
+
+        #logits_same
+        logits_same = self.linear2(h)
+        #h_all = self.norm3(self.activ3(self.linear2(h)))
+        #logits_same = self.decoder2(h_all)
+
+        return logits_lm, logits_clsf, logits_same
 
 
 def main(train_cfg='config/pretrain.json',
@@ -226,6 +240,7 @@ def main(train_cfg='config/pretrain.json',
     model = BertModel4Pretrain(model_cfg)
     criterion1 = nn.CrossEntropyLoss(reduction='none')
     criterion2 = nn.CrossEntropyLoss()
+    criterion3 = nn.CrossEntropyLoss(reduction='none')
 
     optimizer = optim.optim4GPU(cfg, model)
     trainer = train.Trainer(cfg, model, data_iter, optimizer, save_dir, get_device())
@@ -235,18 +250,26 @@ def main(train_cfg='config/pretrain.json',
     def get_loss(model, batch, global_step): # make sure loss is tensor
         input_ids, segment_ids, input_mask, masked_ids, masked_pos, masked_weights, is_next = batch
 
-        logits_lm, logits_clsf = model(input_ids, segment_ids, input_mask, masked_pos)
+        #logits_lm, logits_clsf = model(input_ids, segment_ids, input_mask, masked_pos)
+        logits_lm, logits_clsf, logits_same = model(input_ids, segment_ids, input_mask, masked_pos)
         loss_lm = criterion1(logits_lm.transpose(1, 2), masked_ids) # for masked LM
         loss_lm = (loss_lm*masked_weights.float()).mean()
         loss_clsf = criterion2(logits_clsf, is_next) # for sentence classification
+        loss_same = criterion3(logits_same.transpose(1, 2), input_ids)
+        loss_same = (loss_same*input_mask.float()).mean()
+        #loss_same = loss_same.mean()
+        #loss_clsf *= 1000
+        print(loss_lm.item(), loss_clsf.item(), loss_same.item())
         writer.add_scalars('data/scalar_group',
                            {'loss_lm': loss_lm.item(),
                             'loss_clsf': loss_clsf.item(),
-                            'loss_total': (loss_lm + loss_clsf).item(),
+                            'loss_same': loss_same.item(),
+                            'loss_total': (loss_clsf + loss_lm + loss_same).item(),
                             'lr': optimizer.get_lr()[0],
                            },
                            global_step)
-        return loss_lm + loss_clsf
+
+        return loss_lm + loss_clsf + logits_same
 
     trainer.train(get_loss, model_file, None, data_parallel)
 

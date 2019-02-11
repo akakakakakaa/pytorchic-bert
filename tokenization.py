@@ -10,7 +10,6 @@ import collections
 import unicodedata
 import six
 
-
 def convert_to_unicode(text):
     """Converts `text` to Unicode (if it's not already), assuming utf-8 input."""
     if six.PY3:
@@ -68,9 +67,29 @@ def load_vocab(vocab_file):
             index += 1
     return vocab
 
+def load_vocab_with_count(vocab_file, other_tokens=[]):
+    """Loads a vocabulary file into a dictionary."""
+    vocab = collections.OrderedDict()
+    vocab_count = collections.OrderedDict()
+    index = 0
+    for token in other_tokens:
+        vocab[token] = index
+        vocab_count[token] = 0
+        index += 1
+
+    with open(vocab_file, "r") as reader:
+        while True:
+            line = convert_to_unicode(reader.readline())
+            if not line:
+                break
+            token, count = line.split()
+            vocab[token] = index
+            vocab_count[token] = count
+            index += 1
+    return vocab, vocab_count
 
 def convert_tokens_to_ids(vocab, tokens):
-    """Converts a sequence of tokens into ids using the vocab."""
+    """Converts a sequence of tokens into ids usingss the vocab."""
     ids = []
     for token in tokens:
         ids.append(vocab[token])
@@ -89,15 +108,19 @@ def whitespace_tokenize(text):
 class FullTokenizer(object):
     """Runs end-to-end tokenziation."""
 
-    def __init__(self, vocab_file, do_lower_case=True):
-        self.vocab = load_vocab(vocab_file)
+    def __init__(self, vocab_file, do_lower_case=True, other_tokens=[]):
+        #self.vocab = load_vocab(vocab_file)
+        self.vocab, self.vocab_count = load_vocab_with_count(vocab_file, other_tokens)
         self.basic_tokenizer = BasicTokenizer(do_lower_case=do_lower_case)
-        self.wordpiece_tokenizer = WordpieceTokenizer(vocab=self.vocab)
+        #self.tokenizer = WordpieceTokenizer(vocab=self.vocab)
+        #self.tokenizer = SentencePieceTokenizer(vocab=self.vocab)
+        self.tokenizer = BasicVocabTokenizer(vocab=self.vocab)
 
     def tokenize(self, text):
         split_tokens = []
-        for token in self.basic_tokenizer.tokenize(text):
-            for sub_token in self.wordpiece_tokenizer.tokenize(token):
+        #for token in self.basic_tokenizer.tokenize(text):
+        for token in whitespace_tokenize(text):
+            for sub_token in self.tokenizer.tokenize(token):
                 split_tokens.append(sub_token)
 
         return split_tokens
@@ -180,6 +203,86 @@ class BasicTokenizer(object):
                 output.append(char)
         return "".join(output)
 
+class BasicVocabTokenizer(object):
+    def __init__(self, vocab, unk_token="[UNK]"):
+        self.vocab = vocab
+        self.unk_token = unk_token
+
+    def tokenize(self, text):
+        text = convert_to_unicode(text)
+
+        output_tokens = []
+        for token in whitespace_tokenize(text):
+            token = unicodedata.normalize('NFC', token)
+
+            if token in self.vocab:
+                output_tokens.append(token)
+            else:
+                output_tokens.append(self.unk_token)
+
+        return output_tokens
+
+class SentencePieceTokenizer(object):
+    """Runs WordPiece tokenization."""
+
+    def __init__(self, vocab, unk_token="[UNK]", max_input_chars_per_word=100):
+        self.vocab = vocab
+        self.unk_token = unk_token
+        self.max_input_chars_per_word = max_input_chars_per_word
+
+    def tokenize(self, text):
+        """Tokenizes a piece of text into its word pieces.
+
+        This uses a greedy longest-match-first algorithm to perform tokenization
+        using the given vocabulary.
+
+        For example:
+          input = "unaffable"
+          output = ["un", "##aff", "##able"]
+
+        Args:
+          text: A single token or whitespace separated tokens. This should have
+            already been passed through `BasicTokenizer.
+
+        Returns:
+          A list of wordpiece tokens.
+        """
+        text = convert_to_unicode(text)
+
+        output_tokens = []
+        for token in whitespace_tokenize(text):
+            #multilingual 데이터는 각,난,닫 단위로 처리함
+            chars = list(unicodedata.normalize('NFC', token))
+
+            if len(chars) > self.max_input_chars_per_word:
+                output_tokens.append(self.unk_token)
+                continue
+
+            is_bad = False
+            start = 0
+            sub_tokens = []
+            while start < len(chars):
+                end = len(chars)
+                cur_substr = None
+                while start < end:
+                    substr = "".join(chars[start:end])
+                    if start > 0:
+                        substr = "▁" + substr
+                    if substr in self.vocab:
+                        cur_substr = substr
+                        break
+                    end -= 1
+                if cur_substr is None:
+                    is_bad = True
+                    break
+                sub_tokens.append(cur_substr)
+                start = end
+
+            if is_bad:
+                output_tokens.append(self.unk_token)
+            else:
+                output_tokens.extend(sub_tokens)
+        return output_tokens
 
 class WordpieceTokenizer(object):
     """Runs WordPiece tokenization."""
@@ -206,12 +309,13 @@ class WordpieceTokenizer(object):
         Returns:
           A list of wordpiece tokens.
         """
-
         text = convert_to_unicode(text)
 
         output_tokens = []
         for token in whitespace_tokenize(text):
-            chars = list(token)
+            #multilingual 데이터는 각,난,닫 단위로 처리함
+            chars = list(unicodedata.normalize('NFC', token))
+
             if len(chars) > self.max_input_chars_per_word:
                 output_tokens.append(self.unk_token)
                 continue
@@ -237,8 +341,10 @@ class WordpieceTokenizer(object):
                 start = end
 
             if is_bad:
+                #print(self.unk_token)
                 output_tokens.append(self.unk_token)
             else:
+                #print(sub_tokens)
                 output_tokens.extend(sub_tokens)
         return output_tokens
 

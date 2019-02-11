@@ -79,6 +79,8 @@ class MultiHeadedSelfAttention(nn.Module):
         super().__init__()
         self.proj_q = nn.Linear(cfg.dim, cfg.dim)
         self.proj_k = nn.Linear(cfg.dim, cfg.dim)
+        #self.proj_q = nn.Conv2d(1, 1, kernel_size=3, stride=1, padding=1)
+        #self.proj_k = nn.Conv2d(1, 1, kernel_size=3, stride=1, padding=1)
         self.proj_v = nn.Linear(cfg.dim, cfg.dim)
         self.drop = nn.Dropout(cfg.p_drop_attn)
         self.scores = None # for visualization
@@ -92,6 +94,11 @@ class MultiHeadedSelfAttention(nn.Module):
         """
         # (B, S, D) -proj-> (B, S, D) -split-> (B, S, H, W) -trans-> (B, H, S, W)
         q, k, v = self.proj_q(x), self.proj_k(x), self.proj_v(x)
+
+        #q, k, v = torch.squeeze(self.proj_q(torch.unsqueeze(x, dim=1)), dim=1), \
+        #          torch.squeeze(self.proj_k(torch.unsqueeze(x, dim=1)), dim=1), \
+        #          self.proj_v(x)
+
         q, k, v = (split_last(x, (self.n_heads, -1)).transpose(1, 2)
                    for x in [q, k, v])
         # (B, H, S, W) @ (B, H, W, S) -> (B, H, S, S) -softmax-> (B, H, S, S)
@@ -114,10 +121,15 @@ class PositionWiseFeedForward(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(cfg.dim, cfg.dim_ff)
         self.fc2 = nn.Linear(cfg.dim_ff, cfg.dim)
+        #self.fc1 = nn.Conv2d(1, 3, kernel_size=3, stride=1, padding=1)
+        #self.fc2 = nn.Conv2d(3, 1, kernel_size=3, stride=1, padding=1)
         #self.activ = lambda x: activ_fn(cfg.activ_fn, x)
 
     def forward(self, x):
         # (B, S, D) -> (B, S, D_ff) -> (B, S, D)
+        #first = self.fc1(torch.unsqueeze(x, dim=1))
+        #second = self.fc2(first)
+        #return torch.squeeze(second, dim=1)
         return self.fc2(gelu(self.fc1(x)))
 
 
