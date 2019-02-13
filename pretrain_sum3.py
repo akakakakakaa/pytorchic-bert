@@ -31,8 +31,7 @@ import pickle
 
 class CustomVocabTokenizer():
     def __init__(self, word_vocab_file, pos_vocab_file, dep_vocab_file, pos_dep_word_vocab_file):
-        self.word_tokenizer = tokenization.FullTokenizer(vocab_file=word_vocab_file, do_lower_case=True,
-                                                    other_tokens=["[UNK]", "[CLS]", "[SEP]", "[MASK]"])
+        self.word_tokenizer = tokenization.OriFullTokenizer(vocab_file=word_vocab_file, do_lower_case=True)
         self.word_tokenize = lambda x: self.word_tokenizer.tokenize(self.word_tokenizer.convert_to_unicode(x))
         self.pos_tokenizer = tokenization.FullTokenizer(vocab_file=pos_vocab_file, do_lower_case=True,
                                                    other_tokens=["[UNK]", "[CLS]", "[SEP]", "[MASK]"])
@@ -40,17 +39,6 @@ class CustomVocabTokenizer():
         self.dep_tokenizer = tokenization.FullTokenizer(vocab_file=dep_vocab_file, do_lower_case=True,
                                                    other_tokens=["[UNK]", "[CLS]", "[SEP]", "[MASK]"])
         self.dep_tokenize = lambda x: self.dep_tokenizer.tokenize(self.dep_tokenizer.convert_to_unicode(x))
-
-        with open(pos_dep_word_vocab_file, 'rb') as f:
-            pos_dep_word_2d_arr = pickle.load(f)
-
-        new_pos_dep_word_2d_arr = {}
-        for pos, dep_word in pos_dep_word_2d_arr.items():
-            new_pos = self.pos_tokenizer.convert_tokens_to_ids([self.convert_to_unicode(pos)])[0]
-            new_pos_dep_word_2d_arr[new_pos] = {}
-            for dep, words in dep_word.items():
-                new_dep = self.dep_tokenizer.convert_tokens_to_ids([self.convert_to_unicode(dep)])[0]
-                new_pos_dep_word_2d_arr[new_pos][new_dep] = self.word_tokenizer.convert_tokens_to_ids(self.convert_to_unicode(" ".join(words)).split())
 
 
     def tokenize(self, words, pos, dep):
@@ -142,42 +130,21 @@ class Preprocess4Pretrain(Pipeline):
         target_dep = truncate_tokens(target_dep, self.max_len)
 
         # Add Special Tokens
-        word_tokens = ['[CLS]'] + input_tokens + ['[SEP]'] + target_tokens + ['[SEP]']
+        if rand() < 0.5:
+            word_tokens = ['[CLS]'] + input_tokens + ['[SEP]'] + target_tokens + ['[SEP]']
+        else:
+            word_tokens = ['[CLS]'] + input_tokens + ['[SEP]'] + (['[MASK]'] * len(target_tokens)) + ['[SEP]']
+
+        #word_tokens = ['[CLS]'] + input_tokens + ['[SEP]'] + target_tokens + ['[SEP]']
         pos_tokens = ['[CLS]'] + input_pos + ['[SEP]'] + target_pos + ['[SEP]']
         dep_tokens = ['[CLS]'] + input_dep + ['[SEP]'] + target_dep + ['[SEP]']
         input_segment_ids = [0]*(len(input_tokens)+2) + [1]*(len(target_tokens)+1)
         input_mask = [1]*len(word_tokens)
-
-        target_mask = [1]*len(target_tokens)
-
-        # For masked Language Models
-        masked_word_tokens, masked_pos = [], []
-        # the number of prediction is sometimes less than max_pred when sequence is short
-        n_pred = min(self.max_pred, max(1, int(round(len(word_tokens)*self.mask_prob))))
-        # candidate positions of masked tokens
-        #
-        #cand_pos = [i for i, token in enumerate(word_tokens)
-        #            if word_tokens != '[CLS]' and word_tokens != '[SEP]']
-        #Detect SEP for summary
-        cand_pos = [i for i, token in enumerate(word_tokens)
-                    if word_tokens != '[CLS]']
-        shuffle(cand_pos)
-        for pos in cand_pos[:n_pred]:
-            masked_word_tokens.append(word_tokens[pos])
-            masked_pos.append(pos)
-            if rand() < 0.8: # 80%
-                word_tokens[pos] = '[MASK]'
-        masked_weights = [1]*len(masked_word_tokens)
-
-        #replace right as mask for summary
-        #if rand() < 0.1:
-        #    word_tokens = word_tokens[:len(input_tokens)+2] + ['[MASK]']*len(self.max_len - len(input_tokens)+2)
-        #    pos_tokens = pos_tokens[:len(input_pos)+2] + ['[MASK]']*len(self.max_len - len(input_pos)+2)
-        #    dep_tokens = dep_tokens[:len(input_dep)+2] + ['[MASK]']*len(self.max_len - len(input_dep)+2)
+        target_mask = [1]*(len(target_tokens) + 1)
 
         input_word_ids, input_pos_ids, input_dep_ids = self.indexer(word_tokens, pos_tokens, dep_tokens)
-        masked_word_ids, _, _ = self.indexer(masked_word_tokens, [], [])
-        target_word_ids, target_pos_ids, target_dep_ids = self.indexer(target_tokens, target_pos, target_dep)
+        target_word_ids, target_pos_ids, target_dep_ids = self.indexer(target_tokens + ['[SEP]'], target_pos + ['[SEP]'], target_dep + ['[SEP]'])
+
 
         # Zero Padding
         input_n_pad = self.max_len - len(input_word_ids)
@@ -193,86 +160,47 @@ class Preprocess4Pretrain(Pipeline):
         target_dep_ids.extend([0]*target_n_pad)
         target_mask.extend([0]*target_n_pad)
 
-        # Zero Padding for masked target
-        if self.max_pred > n_pred:
-            n_pad = self.max_pred - n_pred
-            masked_word_ids.extend([0]*n_pad)
-            masked_pos.extend([0]*n_pad)
-            masked_weights.extend([0]*n_pad)
-
         return (input_word_ids,
-                input_pos_ids,
-                input_dep_ids,
                 input_segment_ids,
                 input_mask,
-                masked_word_ids,
-                masked_pos,
-                masked_weights,
                 target_word_ids,
-                target_pos_ids,
-                target_dep_ids,
                 target_mask)
 
 
 class BertModel4Pretrain(nn.Module):
     "Bert Model for Pretrain : Masked LM and next sentence classification"
-    def __init__(self, cfg, word_vocab_size, pos_vocab_size, dep_vocab_size):
+    def __init__(self, cfg):
         super().__init__()
         self.transformer = models.Transformer(cfg)
-
-        #logits_pos
-        self.conv1 = nn.Conv2d(1, pos_vocab_size, kernel_size=(3, 3), padding=1)
-        self.conv1_2 = nn.Conv2d(pos_vocab_size, 1, kernel_size=(3, 3), padding=1)
-        self.activ1 = models.gelu
-        self.norm1 = models.LayerNorm(cfg)
-        self.decoder1 = nn.Linear(cfg.dim, pos_vocab_size)
-
-        #logits_vocab
-        self.conv2 = nn.Conv2d(1, dep_vocab_size, kernel_size=(3, 3), padding=1)
-        self.conv2_2 = nn.Conv2d(dep_vocab_size, 1, kernel_size=(3, 3), padding=1)
-        self.activ2 = models.gelu
-        self.norm2 = models.LayerNorm(cfg)
-        self.decoder2 = nn.Linear(cfg.dim, dep_vocab_size)
 
         #logits_word_vocab_size
         self.fc3 = nn.Linear(cfg.dim, cfg.dim)
         self.activ3 = models.gelu
         self.norm3 = models.LayerNorm(cfg)
-        embed_weight = self.transformer.embed.tok_embed.weight
-        n_vocab, n_dim = embed_weight.size()
-        self.decoder3 = nn.Linear(n_dim, n_vocab, bias=False)
-        self.decoder3.weight = embed_weight
-        self.decoder3_bias = nn.Parameter(torch.zeros(n_vocab))
+        embed_weight3 = self.transformer.embed.tok_embed.weight
+        n_vocab3, n_dim3 = embed_weight3.size()
+        self.decoder3 = nn.Linear(n_dim3, n_vocab3, bias=False)
+        self.decoder3.weight = embed_weight3
+        self.decoder3_bias = nn.Parameter(torch.zeros(n_vocab3))
 
-    def forward(self,
-                input_word_ids,
-                input_segment_ids,
-                masked_pos,
-                input_mask,
-                target_word_ids,
-                target_mask):
-        h = self.transformer(input_word_ids, input_segment_ids, input_mask)
 
-        input_mask = input_mask[:, :, None].expand(-1, -1, h.size(-1))
-        h_input_masked = torch.gather(h, 1, input_mask)
-        h_masked_pos = self.norm1(self.activ1(torch.squeeze(self.conv1_2(self.conv1(torch.unsqueeze(h_input_masked, 1))), 1)))
-        logits_pos = self.decoder1(h_masked_pos)
+    def forward(self, input_ids, segment_ids, input_mask, target_mask):
+        h = self.transformer(input_ids, segment_ids, input_mask)
 
-        h_masked_dep = self.norm1(self.activ1(torch.squeeze(self.conv2_2(self.conv2(torch.unsqueeze(h_input_masked, 1))), 1)))
-        logits_dep = self.decoder2(h_masked_dep)
-
-        masked_pos = masked_pos[:, :, None].expand(-1, -1, h.size(-1))
-        h_masked = torch.gather(h, 1, masked_pos)
+        target_mask = target_mask[:, :, None].expand(-1, -1, h.size(-1))
+        h_masked = torch.gather(h, 1, target_mask)
         h_masked_word = self.norm3(self.activ3(self.fc3(h_masked)))
         logits_word = self.decoder3(h_masked_word) + self.decoder3_bias
 
-        return logits_pos, logits_dep, logits_word
+        return logits_word
+
 
 
 def main(train_cfg='config/pretrain.json',
          model_cfg='config/bert_base.json',
          data_file='/root/voucher/dataset/tifu/bert/train.tsv',
          model_file=None,
+         pretrain_file=None,
          data_parallel=True,
          word_vocab='/root/voucher/dataset/tifu/bert/word_vocab.txt',
          pos_vocab='/root/voucher/dataset/tifu/bert/pos_vocab.txt',
@@ -321,12 +249,8 @@ def main(train_cfg='config/pretrain.json',
                                max_len,
                                pipeline=pipeline)
 
-    model = BertModel4Pretrain(model_cfg,
-                               custom_tokenizer.get_word_vocab_size(),
-                               custom_tokenizer.get_pos_vocab_size(),
-                               custom_tokenizer.get_dep_vocab_size())
-    criterion1 = nn.CrossEntropyLoss(reduction='none')
-    criterion2 = nn.CrossEntropyLoss(reduction='none')
+    model = BertModel4Pretrain(model_cfg)
+
     criterion3 = nn.CrossEntropyLoss(reduction='none')
 
     optimizer = optim.optim4GPU(cfg, model)
@@ -337,83 +261,51 @@ def main(train_cfg='config/pretrain.json',
     if mode == 'train':
         def get_loss(model, batch, global_step): # make sure loss is tensor
             input_word_ids,\
-            input_pos_ids,\
-            input_dep_ids,\
             input_segment_ids,\
             input_mask,\
-            masked_word_ids,\
-            masked_pos,\
-            masked_weights,\
             target_word_ids,\
-            target_pos_ids,\
-            target_dep_ids,\
             target_mask = batch
 
-            logits_pos, logits_dep, logits_word = model(input_word_ids,
-                                                        input_segment_ids,
-                                                        masked_pos,
-                                                        input_mask,
-                                                        target_word_ids,
-                                                        target_mask)
+            logits_word = model(input_word_ids,
+                                input_segment_ids,
+                                input_mask,
+                                target_mask)
 
-            loss_pos = criterion1(logits_pos.transpose(1, 2), input_pos_ids) # for masked pos
-            loss_pos = (loss_pos*input_mask.float()).mean()
-
-            loss_dep = criterion2(logits_dep.transpose(1, 2), input_dep_ids) # for masked dep
-            loss_dep = (loss_dep*input_mask.float()).mean()
-
-            loss_word = criterion3(logits_word.transpose(1, 2), masked_word_ids) # for masked word
-            loss_word = (loss_word*masked_weights.float()).mean()
-            print(loss_pos.item(), loss_dep.item(), loss_word.item())
+            loss_word = criterion3(logits_word.transpose(1, 2), target_word_ids) # for masked word
+            loss_word = (loss_word*target_mask.float()).mean()
+            print(loss_word.item())
             writer.add_scalars('data/scalar_group',
-                               {'loss_pos': loss_pos.item(),
-                                'loss_dep': loss_dep.item(),
-                                'loss_word': loss_word.item(),
-                                'loss_total': (loss_pos + loss_dep + loss_word).item(),
+                               {'loss_word': loss_word.item(),
+                                'loss_total': loss_word.item(),
                                 'lr': optimizer.get_lr()[0],
                                },
                                global_step)
 
-            return loss_pos + loss_dep + loss_word
+            return loss_word
 
-        trainer.train(get_loss, model_file, None, data_parallel)
+        trainer.train(get_loss, model_file, pretrain_file, data_parallel)
     elif mode == 'eval':
         def evaluate(model, batch):
             input_word_ids,\
-            input_pos_ids,\
-            input_dep_ids,\
             input_segment_ids,\
             input_mask,\
-            masked_word_ids,\
-            masked_pos,\
-            masked_weights,\
             target_word_ids,\
-            target_pos_ids,\
-            target_dep_ids,\
             target_mask = batch
-            logits_pos, logits_dep, logits_word = model(input_word_ids,
-                                                        input_segment_ids,
-                                                        masked_pos,
-                                                        input_mask,
-                                                        target_word_ids,
-                                                        target_mask)
-            _, label_pos = logits_pos.max(-1)
-            result_pos = (label_pos == input_pos_ids).float() #.cpu().numpy()
-            pos_accuracy = result_pos.mean()
 
-            _, label_dep = logits_dep.max(-1)
-            result_dep = (label_dep == input_dep_ids).float()
-            dep_accuracy = result_dep.mean()
+            logits_word = model(input_word_ids,
+                                input_segment_ids,
+                                input_mask,
+                                target_mask)
 
             _, label_word = logits_word.max(-1)
-            result_word = (label_word == masked_word_ids).float()
+            result_word = (label_word == target_word_ids).float()
             word_accuracy = result_word.mean()
 
-            accuracies = [pos_accuracy, dep_accuracy, word_accuracy]
-            results = [result_pos, result_dep, result_word]
+            accuracies = [word_accuracy]
+            results = [result_word]
             return accuracies, results
 
-        results = trainer.eval(evaluate, model_file, data_parallel, eval_kind_names=["PosTagging", "SyntaxParsing", "Word"])
+        results = trainer.eval(evaluate, model_file, data_parallel, eval_kind_names=["Word"])
         print(results)
 
 

@@ -142,42 +142,21 @@ class Preprocess4Pretrain(Pipeline):
         target_dep = truncate_tokens(target_dep, self.max_len)
 
         # Add Special Tokens
-        word_tokens = ['[CLS]'] + input_tokens + ['[SEP]'] + target_tokens + ['[SEP]']
+        if rand() < 0.5:
+            word_tokens = ['[CLS]'] + input_tokens + ['[SEP]'] + target_tokens + ['[SEP]']
+        else:
+            word_tokens = ['[CLS]'] + input_tokens + ['[SEP]'] + (['[MASK]'] * len(target_tokens)) + ['[SEP]']
+
+        #word_tokens = ['[CLS]'] + input_tokens + ['[SEP]'] + target_tokens + ['[SEP]']
         pos_tokens = ['[CLS]'] + input_pos + ['[SEP]'] + target_pos + ['[SEP]']
         dep_tokens = ['[CLS]'] + input_dep + ['[SEP]'] + target_dep + ['[SEP]']
         input_segment_ids = [0]*(len(input_tokens)+2) + [1]*(len(target_tokens)+1)
         input_mask = [1]*len(word_tokens)
-
-        target_mask = [1]*len(target_tokens)
-
-        # For masked Language Models
-        masked_word_tokens, masked_pos = [], []
-        # the number of prediction is sometimes less than max_pred when sequence is short
-        n_pred = min(self.max_pred, max(1, int(round(len(word_tokens)*self.mask_prob))))
-        # candidate positions of masked tokens
-        #
-        #cand_pos = [i for i, token in enumerate(word_tokens)
-        #            if word_tokens != '[CLS]' and word_tokens != '[SEP]']
-        #Detect SEP for summary
-        cand_pos = [i for i, token in enumerate(word_tokens)
-                    if word_tokens != '[CLS]']
-        shuffle(cand_pos)
-        for pos in cand_pos[:n_pred]:
-            masked_word_tokens.append(word_tokens[pos])
-            masked_pos.append(pos)
-            if rand() < 0.8: # 80%
-                word_tokens[pos] = '[MASK]'
-        masked_weights = [1]*len(masked_word_tokens)
-
-        #replace right as mask for summary
-        #if rand() < 0.1:
-        #    word_tokens = word_tokens[:len(input_tokens)+2] + ['[MASK]']*len(self.max_len - len(input_tokens)+2)
-        #    pos_tokens = pos_tokens[:len(input_pos)+2] + ['[MASK]']*len(self.max_len - len(input_pos)+2)
-        #    dep_tokens = dep_tokens[:len(input_dep)+2] + ['[MASK]']*len(self.max_len - len(input_dep)+2)
+        target_mask = [1]*(len(target_tokens) + 1)
 
         input_word_ids, input_pos_ids, input_dep_ids = self.indexer(word_tokens, pos_tokens, dep_tokens)
-        masked_word_ids, _, _ = self.indexer(masked_word_tokens, [], [])
-        target_word_ids, target_pos_ids, target_dep_ids = self.indexer(target_tokens, target_pos, target_dep)
+        target_word_ids, target_pos_ids, target_dep_ids = self.indexer(target_tokens + ['[SEP]'], target_pos + ['[SEP]'], target_dep + ['[SEP]'])
+
 
         # Zero Padding
         input_n_pad = self.max_len - len(input_word_ids)
@@ -193,21 +172,11 @@ class Preprocess4Pretrain(Pipeline):
         target_dep_ids.extend([0]*target_n_pad)
         target_mask.extend([0]*target_n_pad)
 
-        # Zero Padding for masked target
-        if self.max_pred > n_pred:
-            n_pad = self.max_pred - n_pred
-            masked_word_ids.extend([0]*n_pad)
-            masked_pos.extend([0]*n_pad)
-            masked_weights.extend([0]*n_pad)
-
         return (input_word_ids,
                 input_pos_ids,
                 input_dep_ids,
                 input_segment_ids,
                 input_mask,
-                masked_word_ids,
-                masked_pos,
-                masked_weights,
                 target_word_ids,
                 target_pos_ids,
                 target_dep_ids,
@@ -221,15 +190,13 @@ class BertModel4Pretrain(nn.Module):
         self.transformer = models.Transformer(cfg)
 
         #logits_pos
-        self.conv1 = nn.Conv2d(1, pos_vocab_size, kernel_size=(3, 3), padding=1)
-        self.conv1_2 = nn.Conv2d(pos_vocab_size, 1, kernel_size=(3, 3), padding=1)
+        self.fc1 = nn.Linear(cfg.dim, cfg.dim)
         self.activ1 = models.gelu
         self.norm1 = models.LayerNorm(cfg)
         self.decoder1 = nn.Linear(cfg.dim, pos_vocab_size)
 
         #logits_vocab
-        self.conv2 = nn.Conv2d(1, dep_vocab_size, kernel_size=(3, 3), padding=1)
-        self.conv2_2 = nn.Conv2d(dep_vocab_size, 1, kernel_size=(3, 3), padding=1)
+        self.fc2 = nn.Linear(cfg.dim, cfg.dim)
         self.activ2 = models.gelu
         self.norm2 = models.LayerNorm(cfg)
         self.decoder2 = nn.Linear(cfg.dim, dep_vocab_size)
@@ -238,31 +205,30 @@ class BertModel4Pretrain(nn.Module):
         self.fc3 = nn.Linear(cfg.dim, cfg.dim)
         self.activ3 = models.gelu
         self.norm3 = models.LayerNorm(cfg)
-        embed_weight = self.transformer.embed.tok_embed.weight
-        n_vocab, n_dim = embed_weight.size()
-        self.decoder3 = nn.Linear(n_dim, n_vocab, bias=False)
-        self.decoder3.weight = embed_weight
-        self.decoder3_bias = nn.Parameter(torch.zeros(n_vocab))
+        embed_weight3 = self.transformer.embed.tok_embed.weight
+        n_vocab3, n_dim3 = embed_weight3.size()
+        self.decoder3 = nn.Linear(n_dim3, n_vocab3, bias=False)
+        self.decoder3.weight = embed_weight3
+        self.decoder3_bias = nn.Parameter(torch.zeros(n_vocab3))
 
     def forward(self,
                 input_word_ids,
                 input_segment_ids,
-                masked_pos,
+                input_pos_ids,
+                input_dep_ids,
                 input_mask,
-                target_word_ids,
                 target_mask):
         h = self.transformer(input_word_ids, input_segment_ids, input_mask)
 
-        input_mask = input_mask[:, :, None].expand(-1, -1, h.size(-1))
-        h_input_masked = torch.gather(h, 1, input_mask)
-        h_masked_pos = self.norm1(self.activ1(torch.squeeze(self.conv1_2(self.conv1(torch.unsqueeze(h_input_masked, 1))), 1)))
+        input_segment_ids = input_segment_ids[:, :, None].expand(-1, -1, h.size(-1))
+        h_masked = torch.gather(h, 1, input_segment_ids)
+
+        h_masked_pos = self.norm1(self.activ1(self.fc1(h_masked)))
         logits_pos = self.decoder1(h_masked_pos)
 
-        h_masked_dep = self.norm1(self.activ1(torch.squeeze(self.conv2_2(self.conv2(torch.unsqueeze(h_input_masked, 1))), 1)))
+        h_masked_dep = self.norm2(self.activ2(self.fc2(h_masked)))
         logits_dep = self.decoder2(h_masked_dep)
 
-        masked_pos = masked_pos[:, :, None].expand(-1, -1, h.size(-1))
-        h_masked = torch.gather(h, 1, masked_pos)
         h_masked_word = self.norm3(self.activ3(self.fc3(h_masked)))
         logits_word = self.decoder3(h_masked_word) + self.decoder3_bias
 
@@ -341,9 +307,6 @@ def main(train_cfg='config/pretrain.json',
             input_dep_ids,\
             input_segment_ids,\
             input_mask,\
-            masked_word_ids,\
-            masked_pos,\
-            masked_weights,\
             target_word_ids,\
             target_pos_ids,\
             target_dep_ids,\
@@ -351,19 +314,19 @@ def main(train_cfg='config/pretrain.json',
 
             logits_pos, logits_dep, logits_word = model(input_word_ids,
                                                         input_segment_ids,
-                                                        masked_pos,
+                                                        input_pos_ids,
+                                                        input_dep_ids,
                                                         input_mask,
-                                                        target_word_ids,
                                                         target_mask)
 
-            loss_pos = criterion1(logits_pos.transpose(1, 2), input_pos_ids) # for masked pos
-            loss_pos = (loss_pos*input_mask.float()).mean()
+            loss_pos = criterion1(logits_pos.transpose(1, 2), target_pos_ids) # for masked pos
+            loss_pos = (loss_pos*target_mask.float()).mean()
 
-            loss_dep = criterion2(logits_dep.transpose(1, 2), input_dep_ids) # for masked dep
-            loss_dep = (loss_dep*input_mask.float()).mean()
+            loss_dep = criterion2(logits_dep.transpose(1, 2), target_dep_ids) # for masked dep
+            loss_dep = (loss_dep*target_mask.float()).mean()
 
-            loss_word = criterion3(logits_word.transpose(1, 2), masked_word_ids) # for masked word
-            loss_word = (loss_word*masked_weights.float()).mean()
+            loss_word = criterion3(logits_word.transpose(1, 2), target_word_ids) # for masked word
+            loss_word = (loss_word*target_mask.float()).mean()
             print(loss_pos.item(), loss_dep.item(), loss_word.item())
             writer.add_scalars('data/scalar_group',
                                {'loss_pos': loss_pos.item(),
@@ -384,29 +347,27 @@ def main(train_cfg='config/pretrain.json',
             input_dep_ids,\
             input_segment_ids,\
             input_mask,\
-            masked_word_ids,\
-            masked_pos,\
-            masked_weights,\
             target_word_ids,\
             target_pos_ids,\
             target_dep_ids,\
             target_mask = batch
+
             logits_pos, logits_dep, logits_word = model(input_word_ids,
                                                         input_segment_ids,
-                                                        masked_pos,
+                                                        input_pos_ids,
+                                                        input_dep_ids,
                                                         input_mask,
-                                                        target_word_ids,
                                                         target_mask)
             _, label_pos = logits_pos.max(-1)
-            result_pos = (label_pos == input_pos_ids).float() #.cpu().numpy()
+            result_pos = (label_pos == target_pos_ids).float() #.cpu().numpy()
             pos_accuracy = result_pos.mean()
 
             _, label_dep = logits_dep.max(-1)
-            result_dep = (label_dep == input_dep_ids).float()
+            result_dep = (label_dep == target_dep_ids).float()
             dep_accuracy = result_dep.mean()
 
             _, label_word = logits_word.max(-1)
-            result_word = (label_word == masked_word_ids).float()
+            result_word = (label_word == target_word_ids).float()
             word_accuracy = result_word.mean()
 
             accuracies = [pos_accuracy, dep_accuracy, word_accuracy]

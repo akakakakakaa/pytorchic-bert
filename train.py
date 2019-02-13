@@ -77,14 +77,14 @@ class Trainer(object):
             print('Epoch %d/%d : Average Loss %5.3f'%(e+1, self.cfg.n_epochs, loss_sum/(i+1)))
         self.save(global_step)
 
-    def eval(self, evaluate, model_file, data_parallel=True, eval_kind_names=[]):
+    def eval(self, evaluate, model_file, pretrain_file, data_parallel=True, eval_kind_names=[]):
         if len(eval_kind_names) == 0:
             print("Please write eval kind names")
             exit(1)
 
         """ Evaluation Loop """
         self.model.eval() # evaluation mode
-        self.load(model_file, None)
+        self.load(model_file, pretrain_file)
         model = self.model.to(self.device)
         if data_parallel: # use Data Parallelism with Multi-GPU
             model = nn.DataParallel(model)

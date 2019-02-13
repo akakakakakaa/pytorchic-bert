@@ -5,7 +5,9 @@
 	"p_drop_attn": 0.1,
 	"n_heads": 12,
 	"p_drop_hidden": 0.1,
-	"max_len": 384,
+	"max_len": 512,
 	"n_segments": 2,
-	"vocab_size": 114207
+	"vocab_size": 119547,
+	"tag_vocab_size": 19,
+	"dep_vocab_size": 49
 }

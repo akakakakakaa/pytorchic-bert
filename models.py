@@ -18,6 +18,8 @@ from utils import split_last, merge_last
 class Config(NamedTuple):
     "Configuration for BERT model"
     vocab_size: int = None # Size of Vocabulary
+    tag_vocab_size: int = None
+    dep_vocab_size: int = None
     dim: int = 768 # Dimension of Hidden Layer in Transformer Encoder
     n_layers: int = 12 # Numher of Hidden Layers
     n_heads: int = 12 # Numher of Heads in Multi-Headed Attention Layers
@@ -164,3 +166,36 @@ class Transformer(nn.Module):
             h = block(h, mask)
         return h
 
+class Embeddings2(nn.Module):
+    "The embedding module from word, position and token_type embeddings."
+    def __init__(self, cfg):
+        super().__init__()
+        self.tok_embed = nn.Embedding(cfg.vocab_size, cfg.dim) # token embedding
+        self.pos_embed = nn.Embedding(cfg.max_len, cfg.dim) # position embedding
+        self.seg_embed = nn.Embedding(cfg.n_segments, cfg.dim) # segment(token type) embedding
+        self.tag_embed = nn.Embedding(cfg.tag_vocab_size, cfg.dim)
+        self.dep_embed = nn.Embedding(cfg.dep_vocab_size, cfg.dim)
+
+        self.norm = LayerNorm(cfg)
+        self.drop = nn.Dropout(cfg.p_drop_hidden)
+
+    def forward(self, x, seg, tag, dep):
+        seq_len = x.size(1)
+        pos = torch.arange(seq_len, dtype=torch.long, device=x.device)
+        pos = pos.unsqueeze(0).expand_as(x) # (S,) -> (B, S)
+
+        e = self.tok_embed(x) + self.pos_embed(pos) + self.seg_embed(seg) + self.tag_embed(tag) + self.dep_embed(dep)
+        return self.drop(self.norm(e))
+
+class Transformer2(nn.Module):
+    """ Transformer with Self-Attentive Blocks"""
+    def __init__(self, cfg):
+        super().__init__()
+        self.embed = Embeddings2(cfg)
+        self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
+
+    def forward(self, x, seg, pos, dep, mask):
+        h = self.embed(x, seg, pos, dep)
+        for block in self.blocks:
+            h = block(h, mask)
+        return h

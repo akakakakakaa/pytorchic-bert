@@ -218,7 +218,7 @@ class BertModel4Pretrain(nn.Module):
     "Bert Model for Pretrain : Masked LM and next sentence classification"
     def __init__(self, cfg, word_vocab_size, pos_vocab_size, dep_vocab_size):
         super().__init__()
-        self.transformer = models.Transformer(cfg)
+        self.transformer = models.Transformer2(cfg)
 
         #logits_pos
         self.conv1 = nn.Conv2d(1, pos_vocab_size, kernel_size=(3, 3), padding=1)
@@ -247,26 +247,20 @@ class BertModel4Pretrain(nn.Module):
     def forward(self,
                 input_word_ids,
                 input_segment_ids,
+                input_pos_ids,
+                input_dep_ids,
                 masked_pos,
                 input_mask,
                 target_word_ids,
                 target_mask):
-        h = self.transformer(input_word_ids, input_segment_ids, input_mask)
-
-        input_mask = input_mask[:, :, None].expand(-1, -1, h.size(-1))
-        h_input_masked = torch.gather(h, 1, input_mask)
-        h_masked_pos = self.norm1(self.activ1(torch.squeeze(self.conv1_2(self.conv1(torch.unsqueeze(h_input_masked, 1))), 1)))
-        logits_pos = self.decoder1(h_masked_pos)
-
-        h_masked_dep = self.norm1(self.activ1(torch.squeeze(self.conv2_2(self.conv2(torch.unsqueeze(h_input_masked, 1))), 1)))
-        logits_dep = self.decoder2(h_masked_dep)
+        h = self.transformer(input_word_ids, input_segment_ids, input_pos_ids, input_dep_ids, input_mask)
 
         masked_pos = masked_pos[:, :, None].expand(-1, -1, h.size(-1))
         h_masked = torch.gather(h, 1, masked_pos)
         h_masked_word = self.norm3(self.activ3(self.fc3(h_masked)))
         logits_word = self.decoder3(h_masked_word) + self.decoder3_bias
 
-        return logits_pos, logits_dep, logits_word
+        return logits_word
 
 
 def main(train_cfg='config/pretrain.json',
@@ -325,8 +319,6 @@ def main(train_cfg='config/pretrain.json',
                                custom_tokenizer.get_word_vocab_size(),
                                custom_tokenizer.get_pos_vocab_size(),
                                custom_tokenizer.get_dep_vocab_size())
-    criterion1 = nn.CrossEntropyLoss(reduction='none')
-    criterion2 = nn.CrossEntropyLoss(reduction='none')
     criterion3 = nn.CrossEntropyLoss(reduction='none')
 
     optimizer = optim.optim4GPU(cfg, model)
@@ -349,32 +341,27 @@ def main(train_cfg='config/pretrain.json',
             target_dep_ids,\
             target_mask = batch
 
-            logits_pos, logits_dep, logits_word = model(input_word_ids,
-                                                        input_segment_ids,
-                                                        masked_pos,
-                                                        input_mask,
-                                                        target_word_ids,
-                                                        target_mask)
-
-            loss_pos = criterion1(logits_pos.transpose(1, 2), input_pos_ids) # for masked pos
-            loss_pos = (loss_pos*input_mask.float()).mean()
-
-            loss_dep = criterion2(logits_dep.transpose(1, 2), input_dep_ids) # for masked dep
-            loss_dep = (loss_dep*input_mask.float()).mean()
+            logits_word = model(input_word_ids,
+                                input_segment_ids,
+                                input_pos_ids,
+                                input_dep_ids,
+                                masked_pos,
+                                input_mask,
+                                target_word_ids,
+                                target_mask)
 
             loss_word = criterion3(logits_word.transpose(1, 2), masked_word_ids) # for masked word
             loss_word = (loss_word*masked_weights.float()).mean()
-            print(loss_pos.item(), loss_dep.item(), loss_word.item())
+            print(loss_word.item())
             writer.add_scalars('data/scalar_group',
-                               {'loss_pos': loss_pos.item(),
-                                'loss_dep': loss_dep.item(),
+                               {
                                 'loss_word': loss_word.item(),
-                                'loss_total': (loss_pos + loss_dep + loss_word).item(),
+                                'loss_total': loss_word.item(),
                                 'lr': optimizer.get_lr()[0],
                                },
                                global_step)
 
-            return loss_pos + loss_dep + loss_word
+            return loss_word
 
         trainer.train(get_loss, model_file, None, data_parallel)
     elif mode == 'eval':
